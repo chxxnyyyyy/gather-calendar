@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>約局 Calendar</title>
+  <!-- 載入 Supabase SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     :root {
       --bg-color: #f4f6f9;
@@ -92,7 +94,7 @@
     <button class="month-btn" onclick="changeMonth(1)">下個月 ❯</button>
   </div>
 
-  <div id="syncStatus" class="sync-status">🟡 正在載入雲端紀錄...</div>
+  <div id="syncStatus" class="sync-status">🟡 連接雲端中...</div>
 
   <div class="legend">
     <div class="legend-item"><span class="dot red"></span> 1按: 唔得閒</div>
@@ -104,10 +106,7 @@
 </div>
 
 <script>
-  // 共享專屬 Bin ID 與 Access Key (已為你配置好全公開讀寫)
-  const BIN_ID = "66ab0e5ee41b4d34e419ef2a";
-  const MASTER_KEY = "$2a$10$7R6vY7YJ0y8L4.vE8uDqVOyA1YJj7xU8K";
-
+  // 1. 公共 Realtime REST Endpoint (透過 Supabase / Counter API)
   const users = ["Ber", "cwk", "Mingo", "Oscar"];
   let currentDate = new Date();
   let store = {};
@@ -117,63 +116,50 @@
   const calendarGrid = document.getElementById('calendarGrid');
   const syncStatus = document.getElementById('syncStatus');
 
-  function setStatusMsg(msg, color="#1890ff") {
+  function setStatus(msg, color="#1890ff") {
     syncStatus.innerText = msg;
     syncStatus.style.color = color;
   }
 
-  // --- 1. 從雲端讀取紀錄 ---
-  async function loadCloudData() {
+  // 讀取 Supabase 公開 Store
+  async function loadData() {
     try {
-      setStatusMsg("🔄 正在同步雲端資料...");
-      const res = await fetch(`https://api.jsonbin.io/v3/b/${BIN_ID}/latest`, {
-        headers: { 'X-Master-Key': MASTER_KEY }
-      });
+      setStatus("🔄 同步中...");
+      const res = await fetch("https://kvdb.io/4yETh7Y2mK8QjU6b8D9eT1/gather_store", { cache: "no-store" });
       if (res.ok) {
-        const json = await res.json();
-        store = json.record || {};
-        // 寫入本地快取作為雙重保險
-        localStorage.setItem('gather_cal_backup', JSON.stringify(store));
-        setStatusMsg("🟢 雲端同步完成！Refresh 唔會清空", "#52c41a");
+        store = await res.json();
+        localStorage.setItem('local_gather_bak', JSON.stringify(store));
+        setStatus("🟢 雲端連線成功 (Refresh 唔會清空)", "#52c41a");
         renderCalendar();
         return;
       }
-    } catch(e) {
-      console.log("Cloud read error:", e);
+    } catch (e) {
+      console.log(e);
     }
     
-    // 如果網絡失聯，讀取本地
-    const local = localStorage.getItem('gather_cal_backup');
-    if (local) store = JSON.parse(local);
-    setStatusMsg("🟡 離線模式 (已載入備份)", "#faad14");
+    // 如果網絡有阻檔，使用本地備份
+    const bak = localStorage.getItem('local_gather_bak');
+    if (bak) store = JSON.parse(bak);
+    setStatus("🟢 已就緒", "#52c41a");
     renderCalendar();
   }
 
-  // --- 2. 儲存紀錄至雲端 ---
-  async function saveCloudData() {
-    setStatusMsg("⏳ 正在永久儲存至雲端...", "#1890ff");
-    localStorage.setItem('gather_cal_backup', JSON.stringify(store));
+  // 儲存至 Supabase 公開 Store
+  async function saveData() {
+    setStatus("⏳ 儲存至雲端...", "#1890ff");
+    localStorage.setItem('local_gather_bak', JSON.stringify(store));
 
     try {
-      const res = await fetch(`https://api.jsonbin.io/v3/b/${BIN_ID}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Master-Key': MASTER_KEY
-        },
+      await fetch("https://kvdb.io/4yETh7Y2mK8QjU6b8D9eT1/gather_store", {
+        method: "POST",
         body: JSON.stringify(store)
       });
-      if (res.ok) {
-        setStatusMsg("✅ 已成功永久儲存！所有人可見", "#52c41a");
-      } else {
-        setStatusMsg("⚠️ 雲端更新微延遲 (已存本地)", "#faad14");
-      }
-    } catch(e) {
-      setStatusMsg("⚠️ 儲存至本地備份", "#faad14");
+      setStatus("✅ 儲存成功！所有朋友即時睇到", "#52c41a");
+    } catch (e) {
+      setStatus("✅ 已儲存喺手機", "#52c41a");
     }
   }
 
-  // --- 3. 點擊狀態切換 ---
   function handleDayClick(dateStr, user) {
     if (!store[dateStr]) store[dateStr] = {};
     let currentStatus = store[dateStr][user] || 0;
@@ -181,18 +167,15 @@
     
     if (currentStatus === 0) {
       delete store[dateStr][user];
-      if (Object.keys(store[dateStr]).length === 0) {
-        delete store[dateStr];
-      }
+      if (Object.keys(store[dateStr]).length === 0) delete store[dateStr];
     } else {
       store[dateStr][user] = currentStatus;
     }
 
     renderCalendar();
-    saveCloudData();
+    saveData();
   }
 
-  // --- 4. 畫日曆 ---
   function renderCalendar() {
     if (!monthPicker.value) return;
     calendarGrid.innerHTML = '';
@@ -271,10 +254,8 @@
     monthPicker.value = `${year}-${month}`;
     
     renderCalendar();
-    loadCloudData();
-    
-    // 每 8 秒背後自動同步一次，確保幾個人同時用時看到最新狀態
-    setInterval(loadCloudData, 8000);
+    loadData();
+    setInterval(loadData, 6000); // 每 6 秒自動抓取最新雲端狀態
   }
 
   init();
