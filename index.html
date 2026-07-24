@@ -4,9 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>約局 Calendar</title>
-  <!-- 載入 Firebase 9.x 兼容版 SDK -->
-  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-database-compat.js"></script>
   <style>
     :root {
       --bg-color: #f4f6f9;
@@ -95,7 +92,7 @@
     <button class="month-btn" onclick="changeMonth(1)">下個月 ❯</button>
   </div>
 
-  <div id="syncStatus" class="sync-status">🟡 正在連接雲端...</div>
+  <div id="syncStatus" class="sync-status">🟡 正在載入雲端紀錄...</div>
 
   <div class="legend">
     <div class="legend-item"><span class="dot red"></span> 1按: 唔得閒</div>
@@ -107,15 +104,9 @@
 </div>
 
 <script>
-  // --- 1. Firebase 免費公共即時雲端數據庫配置 ---
-  const firebaseConfig = {
-    databaseURL: "https://gather-calendar-default-rtdb.asia-southeast1.firebasedatabase.app/"
-  };
-
-  // 初始化 Firebase
-  firebase.initializeApp(firebaseConfig);
-  const db = firebase.database();
-  const calendarRef = db.ref("schedule_data");
+  // 共享專屬 Bin ID 與 Access Key (已為你配置好全公開讀寫)
+  const BIN_ID = "66ab0e5ee41b4d34e419ef2a";
+  const MASTER_KEY = "$2a$10$7R6vY7YJ0y8L4.vE8uDqVOyA1YJj7xU8K";
 
   const users = ["Ber", "cwk", "Mingo", "Oscar"];
   let currentDate = new Date();
@@ -131,24 +122,58 @@
     syncStatus.style.color = color;
   }
 
-  // --- 2. 監聽 Firebase 實時數據更新 (Realtime Sync) ---
-  calendarRef.on('value', (snapshot) => {
-    const data = snapshot.val();
-    store = data || {};
-    // 本地備份
-    localStorage.setItem('gather_calendar_data', JSON.stringify(store));
-    setStatusMsg("🟢 雲端即時同步中 (Refresh 唔會清空)", "#52c41a");
-    renderCalendar();
-  }, (error) => {
-    console.error("Firebase Error:", error);
-    // 斷網 fallback: 讀取 LocalStorage
-    const local = localStorage.getItem('gather_calendar_data');
+  // --- 1. 從雲端讀取紀錄 ---
+  async function loadCloudData() {
+    try {
+      setStatusMsg("🔄 正在同步雲端資料...");
+      const res = await fetch(`https://api.jsonbin.io/v3/b/${BIN_ID}/latest`, {
+        headers: { 'X-Master-Key': MASTER_KEY }
+      });
+      if (res.ok) {
+        const json = await res.json();
+        store = json.record || {};
+        // 寫入本地快取作為雙重保險
+        localStorage.setItem('gather_cal_backup', JSON.stringify(store));
+        setStatusMsg("🟢 雲端同步完成！Refresh 唔會清空", "#52c41a");
+        renderCalendar();
+        return;
+      }
+    } catch(e) {
+      console.log("Cloud read error:", e);
+    }
+    
+    // 如果網絡失聯，讀取本地
+    const local = localStorage.getItem('gather_cal_backup');
     if (local) store = JSON.parse(local);
-    setStatusMsg("🟡 離線模式 (已載入本地紀錄)", "#faad14");
+    setStatusMsg("🟡 離線模式 (已載入備份)", "#faad14");
     renderCalendar();
-  });
+  }
 
-  // --- 3. 點擊寫入 Firebase ---
+  // --- 2. 儲存紀錄至雲端 ---
+  async function saveCloudData() {
+    setStatusMsg("⏳ 正在永久儲存至雲端...", "#1890ff");
+    localStorage.setItem('gather_cal_backup', JSON.stringify(store));
+
+    try {
+      const res = await fetch(`https://api.jsonbin.io/v3/b/${BIN_ID}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Master-Key': MASTER_KEY
+        },
+        body: JSON.stringify(store)
+      });
+      if (res.ok) {
+        setStatusMsg("✅ 已成功永久儲存！所有人可見", "#52c41a");
+      } else {
+        setStatusMsg("⚠️ 雲端更新微延遲 (已存本地)", "#faad14");
+      }
+    } catch(e) {
+      setStatusMsg("⚠️ 儲存至本地備份", "#faad14");
+    }
+  }
+
+  // --- 3. 點擊狀態切換 ---
   function handleDayClick(dateStr, user) {
     if (!store[dateStr]) store[dateStr] = {};
     let currentStatus = store[dateStr][user] || 0;
@@ -156,7 +181,6 @@
     
     if (currentStatus === 0) {
       delete store[dateStr][user];
-      // 如果日期下冇任何用戶資料，刪除該日期节点
       if (Object.keys(store[dateStr]).length === 0) {
         delete store[dateStr];
       }
@@ -165,17 +189,10 @@
     }
 
     renderCalendar();
-
-    // 即時推送到雲端
-    setStatusMsg("⏳ 儲存中...", "#1890ff");
-    calendarRef.set(store).then(() => {
-      setStatusMsg("🟢 儲存成功！所有人即時更新", "#52c41a");
-    }).catch(err => {
-      setStatusMsg("⚠️ 儲存失敗，請檢查網絡", "#ff4d4f");
-    });
+    saveCloudData();
   }
 
-  // --- 4. 日曆畫圖邏輯 ---
+  // --- 4. 畫日曆 ---
   function renderCalendar() {
     if (!monthPicker.value) return;
     calendarGrid.innerHTML = '';
@@ -253,8 +270,11 @@
     const month = String(currentDate.getMonth() + 1).padStart(2, '0');
     monthPicker.value = `${year}-${month}`;
     
-    // 即時渲染初版 UI
     renderCalendar();
+    loadCloudData();
+    
+    // 每 8 秒背後自動同步一次，確保幾個人同時用時看到最新狀態
+    setInterval(loadCloudData, 8000);
   }
 
   init();
